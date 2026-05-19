@@ -103,7 +103,7 @@ private:
             if (headers_json) {
                 cJSON *iterator = headers_json->child;
                 while (iterator) {
-                    if (iterator->type == cJSON_String && iterator->valuestring != nullptr) {
+                    if (iterator->string && cJSON_IsString(iterator) && iterator->valuestring != nullptr) {
                         hdrs.set(iterator->string, iterator->valuestring);
                     }
                     iterator = iterator->next;
@@ -257,8 +257,8 @@ private:
         ProcessResult pr;
         if (event == MESSAGE) {
             pr = processMessage(msg);
-            if (pr.ok == SWITCH_TRUE) {
-                msg = pr.rewrittenJsonData; // overwrite only on success
+            if (!pr.rewrittenJsonData.empty()) {
+                msg = pr.rewrittenJsonData;
             }
         }
 
@@ -331,13 +331,36 @@ private:
 
         jsonPtr jsonAudio(cJSON_DetachItemFromObject(jsonData, "audioData"), &cJSON_Delete);
 
+        auto write_sanitized_data_json = [&]() {
+            char* jsonString = cJSON_PrintUnformatted(jsonData);
+            if (jsonString) {
+                out.rewrittenJsonData.assign(jsonString);
+                std::free(jsonString);
+            }
+        };
+
         if (!jsonAudio) {
             push_err(out, m_sessionId, "processMessage - streamAudio missing 'audioData' field");
+            write_sanitized_data_json();
             return out;
         }
 
         if (!cJSON_IsString(jsonAudio.get()) || !jsonAudio->valuestring) {
             push_err(out, m_sessionId, "processMessage - 'audioData' is not a string (expected base64 string)");
+            cJSON_AddItemToObject(jsonData, "audioData", cJSON_CreateString("<omitted>"));
+            write_sanitized_data_json();
+            return out;
+        }
+
+        static constexpr size_t kMaxPlayDecodedBytes = 10 * 1024 * 1024;
+        static constexpr size_t kMaxPlayBase64Chars = ((kMaxPlayDecodedBytes + 2) / 3) * 4 + 16;
+        static constexpr int kMaxPlayFilesPerSession = 100;
+
+        const size_t b64_len = std::strlen(jsonAudio->valuestring);
+        if (b64_len > kMaxPlayBase64Chars) {
+            push_err(out, m_sessionId, "processMessage - audioData too large (base64), dropping");
+            cJSON_AddItemToObject(jsonData, "audioData", cJSON_CreateString("<omitted>"));
+            write_sanitized_data_json();
             return out;
         }
 
@@ -359,6 +382,8 @@ private:
                 case 64000: fileType = ".r64"; break;
                 default:
                     push_err(out, m_sessionId, "processMessage - unsupported sample rate: " + std::to_string(sampleRate));
+                    cJSON_AddItemToObject(jsonData, "audioData", cJSON_CreateString("<omitted>"));
+                    write_sanitized_data_json();
                     return out;
             }
         } else if (std::strcmp(jsAudioDataType, "wav") == 0)  fileType = ".wav";
@@ -368,6 +393,8 @@ private:
         else if (std::strcmp(jsAudioDataType, "pcma") == 0)  fileType = ".pcma";
         else {
             push_err(out, m_sessionId, "processMessage - unsupported audio type: " + std::string(jsAudioDataType));
+            cJSON_AddItemToObject(jsonData, "audioData", cJSON_CreateString("<omitted>"));
+            write_sanitized_data_json();
             return out;
         }
 
@@ -377,6 +404,15 @@ private:
             decoded = base64_decode(jsonAudio->valuestring);
         } catch (const std::exception& e) {
             push_err(out, m_sessionId, "processMessage - base64 decode error: " + std::string(e.what()));
+            cJSON_AddItemToObject(jsonData, "audioData", cJSON_CreateString("<omitted>"));
+            write_sanitized_data_json();
+            return out;
+        }
+
+        if (decoded.size() > kMaxPlayDecodedBytes) {
+            push_err(out, m_sessionId, "processMessage - decoded audio too large, dropping");
+            cJSON_AddItemToObject(jsonData, "audioData", cJSON_CreateString("<omitted>"));
+            write_sanitized_data_json();
             return out;
         }
 
@@ -384,6 +420,12 @@ private:
         int idx = 0;
         {
             std::lock_guard<std::mutex> lk(m_stateMutex);
+            if (m_playFile >= kMaxPlayFilesPerSession) {
+                push_err(out, m_sessionId, "processMessage - too many play files in one session, dropping");
+                cJSON_AddItemToObject(jsonData, "audioData", cJSON_CreateString("<omitted>"));
+                write_sanitized_data_json();
+                return out;
+            }
             idx = m_playFile++;
         }
 
@@ -413,6 +455,8 @@ private:
         }
 
         cJSON_AddItemToObject(jsonData, "file", cJSON_CreateString(filePath));
+
+        cJSON_AddItemToObject(jsonData, "audioData", cJSON_CreateString("<omitted>"));
 
         // return rewritten jsonData as string
         char* jsonString = cJSON_PrintUnformatted(jsonData);
@@ -454,15 +498,17 @@ namespace {
 
         memset(tech_pvt, 0, sizeof(private_t));
 
-        strncpy(tech_pvt->sessionId, switch_core_session_get_uuid(session), MAX_SESSION_ID);
-        strncpy(tech_pvt->ws_uri, wsUri, MAX_WS_URI);
+        switch_copy_string(tech_pvt->sessionId, switch_core_session_get_uuid(session), sizeof(tech_pvt->sessionId));
+        switch_copy_string(tech_pvt->ws_uri, wsUri, sizeof(tech_pvt->ws_uri));
         tech_pvt->sampling = desiredSampling;
         tech_pvt->responseHandler = responseHandler;
         tech_pvt->rtp_packets = rtp_packets;
         tech_pvt->channels = channels;
         tech_pvt->audio_paused = 0;
 
-        if (metadata) strncpy(tech_pvt->initialMetadata, metadata, MAX_METADATA_LEN);
+        if (metadata) {
+            switch_copy_string(tech_pvt->initialMetadata, metadata, sizeof(tech_pvt->initialMetadata));
+        }
 
         //size_t buflen = (FRAME_SIZE_8000 * desiredSampling / 8000 * channels * 1000 / RTP_PERIOD * BUFFERED_SEC);
         const size_t buflen = (FRAME_SIZE_8000 * desiredSampling / 8000 * channels * rtp_packets);
@@ -500,6 +546,23 @@ namespace {
 
     void destroy_tech_pvt(private_t* tech_pvt) {
         switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "%s destroy_tech_pvt\n", tech_pvt->sessionId);
+        if (tech_pvt->pAudioStreamer) {
+            auto sp_wrap = static_cast<std::shared_ptr<AudioStreamer>*>(tech_pvt->pAudioStreamer);
+            tech_pvt->pAudioStreamer = nullptr;
+
+            std::shared_ptr<AudioStreamer> streamer;
+            if (sp_wrap && *sp_wrap) {
+                streamer = *sp_wrap;
+            }
+
+            delete sp_wrap;
+
+            if (streamer) {
+                streamer->deleteFiles();
+                streamer->markCleanedUp();
+                streamer->disconnect();
+            }
+        }
         if (tech_pvt->resampler) {
             speex_resampler_destroy(tech_pvt->resampler);
             tech_pvt->resampler = nullptr;
@@ -514,6 +577,9 @@ namespace {
 
 extern "C" {
     int validate_ws_uri(const char* url, char* wsUri) {
+        if (!url || !wsUri) return 0;
+        if (std::strlen(url) >= MAX_WS_URI) return 0;
+
         const char* scheme = nullptr;
         const char* hostStart = nullptr;
         const char* hostEnd = nullptr;
@@ -556,7 +622,7 @@ extern "C" {
         }
 
         // Copy valid URI to wsUri
-        std::strncpy(wsUri, url, MAX_WS_URI);
+        switch_copy_string(wsUri, url, MAX_WS_URI);
         return 1;
     }
 
@@ -649,7 +715,7 @@ extern "C" {
                                         char* metadata,
                                         void **ppUserData)
     {
-        int deflate, heart_beat;
+        int deflate = 0, heart_beat = 0;
         bool suppressLog = false;
         const char* buffer_size;
         const char* extra_headers;
@@ -681,7 +747,7 @@ extern "C" {
         if (heartBeat) {
             char *endptr;
             long value = strtol(heartBeat, &endptr, 10);
-            if (*endptr == '\0' && value <= INT_MAX && value >= INT_MIN) {
+            if (*endptr == '\0' && value > 0 && value <= INT_MAX && value >= INT_MIN) {
                 heart_beat = (int) value;
             }
         }
