@@ -8,32 +8,17 @@
 
 ### :rocket: 推出「双向流」与「自动播放」
 
-我们已发布新版本 **mod_audio_stream v1.0.3**，支持通过 WebSocket 进行原始二进制音频流传输。
-可在 Releases 页面下载，并提供 Debian 12 预编译安装包。
-
-播放功能允许在持续前向推流的同时，播放线程独立运行，从而实现主叫与 WebSocket 端点之间的全双工音频（full-duplex）。
+本模块支持通过 WebSocket 进行原始二进制音频推流，并可选支持由 WebSocket 服务端下发音频进行播放。播放与前向推流相互独立，从而实现主叫与 WebSocket 端点之间的全双工音频（full-duplex）。
 
 主要特性：
 
 - 全双工音频流（呼叫方 ↔ WebSocket）
-- 同时支持 base64 编码音频与原始二进制音频
+- 上行（FreeSWITCH → WebSocket）使用原始二进制音频帧
+- 下行播放（WebSocket → 呼叫方）支持 base64 编码的音频负载
 - 播放可被跟踪、暂停与恢复
 
-🔹 本版本为**商业产品**，可免费使用（包括商业用途），但有 **10 路并发流通道限制**。
-如需超过 10 路并发，或需要源码，请通过邮件联系获取许可方案：[amsoftswitch@gmail.com](mailto:amsoftswitch@gmail.com)。
-
-### 为什么会有商业版
-
-社区版 `mod_audio_stream` 提供可用于生产环境的**单向** WebSocket 音频流能力，适用于 ASR 与实时音频处理等场景。
-而商业版存在的原因是：真实的电话系统在**高并发与生产负载**下会出现一些只有在实践中才会暴露的复杂工程问题，例如：
-
-- 正确处理 FreeSWITCH 会话生命周期
-- 音频注入与关闭流程的线程安全
-- 高负载下的安全重连与资源清理
-- 有界且可预测的内存使用
-- 与 record_session / uuid_record 的正确交互
-
-商业版面向**高并发环境（数千路同时通话，5000+）**设计并测试，强调正确性、稳定性与资源占用可控。
+说明：
+- 本源码仓库采用 MIT License，源码中未实现固定的并发路数限制。
 
 ## 关于
 
@@ -110,6 +95,7 @@ sudo apt-get -y install git \
 
 - per message deflate 压缩默认开启，可显著节省带宽；若要关闭请将变量设为 `true|1`。
 - 心跳：当连接空闲时每隔 N 秒发送一次，避免负载均衡器清理空闲连接。
+- 心跳值必须是正整数；非正数会被忽略。
 - 抑制日志：默认不抑制（false）；WebSocket 服务端返回的响应默认会打印到日志。若担心日志刷屏可设为 `true|1`。事件仍会照常触发，仅影响日志打印。
 - `STREAM_BUFFER_SIZE` 表示每次发送给 WebSocket 的音频块对应的时长。例如想每次发送 100ms 的音频数据，则设置为 100。若省略，默认发送 20ms（即 FreeSWITCH 默认帧大小）。
 - `STREAM_EXTRA_HEADERS` 必须是 JSON 对象的字符串，键为 HTTP Header 名，值为字符串。例如：
@@ -151,6 +137,7 @@ uuid_audio_stream <uuid> start <wss-url> <mix-type> <sampling-rate> <metadata>
 - `sampling-rate`：可选值
   - `8k`：生成 8000 Hz 采样率
   - `16k`：生成 16000 Hz 采样率
+  - 或填写 8000 的整数倍（例如 24000）。非法值会被拒绝。
 - `metadata`：（可选）合法的 `utf-8` 文本，会在音频推流开始前先发送一次
 
 ```text
@@ -289,19 +276,22 @@ WebSocket 服务端可能返回包含 base64 编码音频的 JSON 对象，模�
 }
 ```
 
-- audioDataType：`<raw|wav|mp3|ogg>`
+- audioDataType：`<raw|wav|mp3|ogg|pcmu|pcma>`
 
-模块触发的事件（子类：`mod_audio_stream::play`）内容与 `data` 元素一致，并额外加入 `file` 字段表示生成的文件路径（filePath）：
+模块触发的事件（子类：`mod_audio_stream::play`）内容与 `data` 元素一致，并额外加入 `file` 字段表示生成的文件路径（filePath）。为避免事件/日志过大，`audioData` 会被替换为 `"<omitted>"`：
 
 ```json
 {
   "audioDataType": "raw",
   "sampleRate": 8000,
+  "audioData": "<omitted>",
   "file": "/path/to/the/file"
 }
 ```
 
-若未抑制日志输出，控制台中打印的 `response` 与事件内容一致。原始响应中包含的 base64 音频可能非常大，因此模块会用上述结构替代打印，以避免日志过大。
+若未抑制日志输出，控制台中打印的 `response` 与事件内容一致。
 
+安全限制：
+- 当 `audioData` 过大时会被拒绝（解码后的数据 > 10MB）
+- 单会话最多生成 100 个播放文件
 该特性生成的文件均位于临时目录，并会在会话关闭时被删除。
-
