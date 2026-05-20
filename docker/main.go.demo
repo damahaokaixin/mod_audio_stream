@@ -1,0 +1,192 @@
+// 这段 Golang 代码运行起来后，它和你的 FreeSWITCH 容器交互的完整流水线如下：
+
+// 业务开始：你的话务员（如分机 1001）拿起电话，拨打客户号码。
+
+// 触发推流：FreeSWITCH 的拨号计划（ai_outbound_multi 或 ai_outbound_trunk）拦截到呼叫，立刻向你的 Golang 发起 WebSocket 连接，访问 /stream?agent=1001。
+
+// 媒体处理并发 (核心)：Golang 的 http.HandleFunc 会为这个 1001 的连接分配一个全新的 Goroutine 运行 handleMediaStream。如果此时 1002 也打电话，Golang 会再开一个 Goroutine。两者互不干扰，这就完美解决了多通道并发的问题。
+
+// 业务状态同步：在音频开始传输的同时，客户接起电话，FreeSWITCH 内部触发 CHANNEL_ANSWER 事件。你的 startESLListener 协程捕获到这个事件，打印出日志（实际业务中，你可以在这里修改数据库里订单的状态为“已接通”）。
+
+// 实时识别 (STT)：在 handleMediaStream 中，程序不断地把双声道数据切分成左（话务员）和右（客户），并每积攒 100 毫秒的数据，就丢给 processRealTimeSTT 去做识别。
+
+// 业务结束：电话挂断。FreeSWITCH 自动断开 WebSocket 导致流处理协程退出，同时 ESL 协程收到 CHANNEL_HANGUP 事件进行业务收尾。
+
+package main
+
+import (
+	"bytes"
+	"log"
+	"net/http"
+
+	"github.com/fiorix/go-eventsocket/eventsocket"
+	"github.com/gorilla/websocket"
+)
+
+// ==========================================
+// 1. 全局配置与 WebSocket 升级器
+// ==========================================
+
+var upgrader = websocket.Upgrader{
+	CheckOrigin: func(r *http.Request) bool {
+		return true // 允许 FreeSWITCH 跨域连接
+	},
+}
+
+// ==========================================
+// 2. 媒体流处理引擎 (多通道高并发)
+// ==========================================
+
+// handleMediaStream 处理来自 FreeSWITCH 的 WebSocket 音频推流
+// 每个新的电话呼叫都会触发一个新的 Goroutine 运行此函数，天然支持多路并发
+func handleMediaStream(w http.ResponseWriter, r *http.Request) {
+	// 从 URL 参数中提取拨号计划中配置的信息
+	// 例如：ws://127.0.0.1:8080/stream?agent=1001&direction=outbound
+	agent := r.URL.Query().Get("agent")
+	direction := r.URL.Query().Get("direction")
+
+	log.Printf("[WS-新连接] 话务员: %s | 方向: %s | 等待音频数据流入...", agent, direction)
+
+	// 升级 HTTP 为 WebSocket 连接
+	ws, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Printf("[WS-错误] 升级 WebSocket 失败: %v", err)
+		return
+	}
+	defer ws.Close()
+
+	// 初始化用于组装 PCM 帧的 Buffer (应对网络抖动)
+	callerBuf := new(bytes.Buffer)
+	calleeBuf := new(bytes.Buffer)
+
+	// 持续读取媒体流数据
+	for {
+		messageType, message, err := ws.ReadMessage()
+		if err != nil {
+			log.Printf("[WS-断开] 话务员 %s 的媒体流已结束: %v", agent, err)
+			break
+		}
+
+		// 处理音频二进制帧
+		if messageType == websocket.BinaryMessage {
+			// 将双声道 16bit PCM 数据分离为独立的左右声道
+			callerData, calleeData := splitStereoPCM(message)
+
+			callerBuf.Write(callerData)
+			calleeBuf.Write(calleeData)
+
+			// 缓冲控制：假设每凑够 3200 字节（100ms音频，16000Hz*2bytes*0.1s）发送一次 STT，降低 API 请求频率
+			if callerBuf.Len() >= 3200 {
+				// 提取并清空 Buffer
+				agentAudio := callerBuf.Bytes()
+				clientAudio := calleeBuf.Bytes()
+				callerBuf.Reset()
+				calleeBuf.Reset()
+
+				// 将拆分好的音频异步推送到 STT 引擎，避免阻塞当前的 WebSocket 读取循环
+				go processRealTimeSTT(agent, "agent_channel", agentAudio)
+				go processRealTimeSTT(agent, "client_channel", clientAudio)
+			}
+		}
+	}
+}
+
+// splitStereoPCM 分离交错的立体声 PCM 数据
+// 入参: stereoData 格式为 [左, 左, 右, 右, 左, 左, 右, 右...]
+// 出参: 左声道(主叫), 右声道(被叫)
+func splitStereoPCM(stereoData []byte) ([]byte, []byte) {
+	length := len(stereoData)
+	callerData := make([]byte, length/2)
+	calleeData := make([]byte, length/2)
+
+	// 步长为 4 遍历交错数组
+	for i := 0; i < length-3; i += 4 {
+		// 左声道 (前2字节)
+		callerData[i/2] = stereoData[i]
+		callerData[i/2+1] = stereoData[i+1]
+		// 右声道 (后2字节)
+		calleeData[i/2] = stereoData[i+2]
+		calleeData[i/2+1] = stereoData[i+3]
+	}
+	return callerData, calleeData
+}
+
+// ==========================================
+// 3. AI 实时语音识别 (STT) 占位函数
+// ==========================================
+
+// processRealTimeSTT 模拟对接阿里云/腾讯云/科大讯飞的实时语音识别
+func processRealTimeSTT(agent string, role string, pcmData []byte) {
+	// 【占位提示】
+	// 1. 在真实项目中，这里通常是将 pcmData 写入到特定云厂商的 WebSocket 流中。
+	// 2. 获取到识别文本后，再将其送入 LLM（大语言模型）进行话术辅助判断。
+
+	// 模拟日志输出（生产环境请注释掉，否则日志刷屏）
+	// log.Printf("[STT-识别中] 话务员: %s | 角色: %s | 数据量: %d bytes", agent, role, len(pcmData))
+	_ = pcmData
+}
+
+// ==========================================
+// 4. ESL 信令事件监听引擎 (状态管理)
+// ==========================================
+
+// startESLListener 作为一个独立的后台服务运行，仅负责监控业务状态
+func startESLListener() {
+	c, err := eventsocket.Dial("127.0.0.1:8021", "ClueCon") // 替换为你的容器或宿主机IP及密码
+	if err != nil {
+		log.Fatalf("[ESL-致命错误] 无法连接到 FreeSWITCH ESL: %v", err)
+	}
+	defer c.Close()
+
+	// 仅订阅需要的事件，减轻解析压力
+	_, err = c.Send("events plain CHANNEL_ANSWER CHANNEL_HANGUP")
+	if err != nil {
+		log.Fatalf("[ESL-致命错误] 订阅事件失败: %v", err)
+	}
+
+	log.Println("✅ ESL 信令事件监听器已启动...")
+
+	for {
+		ev, err := c.ReadEvent()
+		if err != nil {
+			log.Printf("[ESL-错误] 读取事件失败: %v", err)
+			continue
+		}
+
+		eventName := ev.Get("Event-Name")
+		uuid := ev.Get("Unique-ID")
+		caller := ev.Get("Caller-Caller-ID-Number")
+		callee := ev.Get("Caller-Destination-Number")
+
+		// 在这里可以将通话状态写入 MySQL/Redis，供前端面板展示
+		switch eventName {
+		case "CHANNEL_ANSWER":
+			log.Printf("[📞 信令-通话接通] UUID: %s | %s 与 %s 正在通话", uuid, caller, callee)
+		case "CHANNEL_HANGUP":
+			cause := ev.Get("Hangup-Cause")
+			log.Printf("[📵 信令-通话挂断] UUID: %s | %s 与 %s 结束通话 | 原因: %s", uuid, caller, callee, cause)
+		}
+	}
+}
+
+// ==========================================
+// 5. 主程序入口
+// ==========================================
+
+func main() {
+	// 1. 启动 ESL 事件监听器（独立协程，不阻塞主线程）
+	go startESLListener()
+
+	// 2. 注册 WebSocket 路由，提供给 FreeSWITCH 拨号计划调用
+	// 对应 Docker 文档中的: ws://127.0.0.1:8080/stream
+	http.HandleFunc("/stream", handleMediaStream)
+
+	// 3. 启动 HTTP/WS 服务
+	port := ":8080"
+	log.Printf("🚀 AI 语音辅助网关后端已启动，监听端口 %s", port)
+
+	err := http.ListenAndServe(port, nil)
+	if err != nil {
+		log.Fatalf("[系统-致命错误] HTTP 服务崩溃: %v", err)
+	}
+}
