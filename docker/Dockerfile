@@ -88,6 +88,8 @@ RUN export PKG_CONFIG_PATH=/usr/local/freeswitch/lib/pkgconfig:/usr/local/lib/pk
     && make -j$(nproc) \
     && make install
 
+
+
 # ==========================================
 # 阶段 2: 最终运行阶段 (Runner)
 # ==========================================
@@ -95,12 +97,13 @@ FROM debian:bookworm-slim
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# 补齐所有运行时的动态库，避免默认加载 WebRTC 和音视频模块时报错
+# 补齐所有运行时的动态库（新增了 libevent-openssl-2.1-7 支持 WSS 加密推流）
 RUN apt-get update && apt-get install -y \
     libsqlite3-0 libcurl4 libpcre3 libedit2 libldns3 libspeex1 libspeexdsp1 \
     libopus0 libsndfile1 libjpeg62-turbo uuid-runtime libssl3 \
-    libevent-2.1-7 zlib1g libpq5 ffmpeg \
+    libevent-2.1-7 libevent-pthreads-2.1-7 libevent-openssl-2.1-7 zlib1g libpq5 ffmpeg \
     libavformat-dev libswscale-dev libavcodec-dev libavutil-dev libswresample-dev \
+    liblua5.2-0 \
     && rm -rf /var/lib/apt/lists/*
 
 # 从 builder 引入编译好的 FS 主程序和底层 C 共享库
