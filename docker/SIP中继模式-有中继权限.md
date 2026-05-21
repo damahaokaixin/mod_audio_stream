@@ -7,9 +7,11 @@
 ## 1. 话机端的配置修改
 与多网关模式完全相同：
 *   登录所有话机后台，将 SIP Server 指向你这台中间层的 IP。端口 `5060`。账号密码使用中间层 `conf/directory/` 中配置的信息。
+*   如果你在宿主机上直接维护分机文件，对应目录为 `/www/wwwroot/jw-free-switch/fs-conf/conf/directory/`。
 
 ## 2. 建立统一的 SIP Trunk 网关
-路径：`conf/sip_profiles/external/`
+容器内路径：`conf/sip_profiles/external/`
+宿主机路径：`/www/wwwroot/jw-free-switch/fs-conf/conf/sip_profiles/external/`
 
 如果你有 100 个话务员，在 Trunk 模式下，你也**只需要创建一个**网关文件。
 新建 `trunk_upstream.xml`：
@@ -44,7 +46,8 @@
 
 ## 3. 配置呼出路由 (Outbound Dialplan)
 
-路径：`conf/dialplan/default.xml`
+容器内路径：`conf/dialplan/default.xml`
+宿主机路径：`/www/wwwroot/jw-free-switch/fs-conf/conf/dialplan/default.xml`
 
 所有话务员的呼出，全部打包塞进这一个 Trunk 中送走。原厂服务器会根据头域中的 Caller ID 自动识别是哪个话务员打的。
 
@@ -69,7 +72,8 @@
 
 ## 4. 配置呼入路由 (Inbound Dialplan)
 
-路径：`conf/dialplan/public.xml`
+容器内路径：`conf/dialplan/public.xml`
+宿主机路径：`/www/wwwroot/jw-free-switch/fs-conf/conf/dialplan/public.xml`
 
 所有打入 Trunk 的电话，都会携带被叫号码 (Destination Number)。我们直接提取这个号码，桥接给对应的本地分机。
 

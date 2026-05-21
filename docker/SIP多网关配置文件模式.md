@@ -12,7 +12,8 @@
 *   **密码 (Password)：** 设置为你在 FreeSWITCH 中设定的密码（默认是 `1234`，可在第 2 步修改）。
 
 ## 2. 配置中间层本地分机 (让话机能连上)
-路径：`conf/directory/default/`
+容器内路径：`conf/directory/default/`
+宿主机路径：`/www/wwwroot/jw-free-switch/fs-conf/conf/directory/default/`
 
 FreeSWITCH 默认已经创建了 1000-1019 的分机。如果你的话务员账号在这些范围内，直接使用即可。
 如果需要新建（例如 8001），复制模板并修改：
@@ -25,7 +26,8 @@ cp 1000.xml 8001.xml
 
 ## 3. 建立向上游（原厂）注册的网关
 
-路径：`conf/sip_profiles/external/`
+容器内路径：`conf/sip_profiles/external/`
+宿主机路径：`/www/wwwroot/jw-free-switch/fs-conf/conf/sip_profiles/external/`
 
 为你拥有的每一个原厂账号，创建一个独立的网关配置文件。例如 `gw_1001.xml` 和 `gw_1002.xml`。
 
@@ -46,7 +48,8 @@ cp 1000.xml 8001.xml
 
 ## 4. 配置呼出路由 (Outbound Dialplan)
 
-路径：`conf/dialplan/default.xml`
+容器内路径：`conf/dialplan/default.xml`
+宿主机路径：`/www/wwwroot/jw-free-switch/fs-conf/conf/dialplan/default.xml`
 
 当话务员打电话给客户时，拦截、推流 AI、并使用对应的网关呼出。将此规则加在 `Local_Extension` 之前：
 
@@ -69,7 +72,8 @@ cp 1000.xml 8001.xml
 
 ## 5. 配置呼入路由 (Inbound Dialplan)
 
-路径：`conf/dialplan/public.xml`
+容器内路径：`conf/dialplan/public.xml`
+宿主机路径：`/www/wwwroot/jw-free-switch/fs-conf/conf/dialplan/public.xml`
 
 当客户拨打原厂号码，原厂将电话送到中间层时，进行拦截、推流，并分发给对应的本地话机。
 

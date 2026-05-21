@@ -1,4 +1,6 @@
 // 这段 Golang 代码运行起来后，它和你的 FreeSWITCH 容器交互的完整流水线如下：
+// 默认部署约定可参考 Docker 文档：宿主机项目根目录为 /www/wwwroot/jw-free-switch/，
+// 其中 FreeSWITCH 配置位于 fs-conf/conf，声音资源位于 fs-sounds/sounds。
 
 // 业务开始：你的话务员（如分机 1001）拿起电话，拨打客户号码。
 
